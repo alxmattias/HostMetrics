@@ -149,7 +149,7 @@ This module is provided as-is without any warranty.
 
 ## Author
 
-Monzphere
+AMATIAS
 
 ## Contributing
 
