@@ -13,117 +13,79 @@ class CControllerHostMetricsData extends CController {
     }
 
     protected function checkInput(): bool {
-        $fields = [
-            'hostids' => 'array_id'
-        ];
-
-        $ret = $this->validateInput($fields);
-
-        if (!$ret) {
-            $this->setResponse(new CControllerResponseData(['error' => $this->getValidationError()]));
-        }
-
-        return $ret;
+        $fields = ['hostids' => 'array_id'];
+        return $this->validateInput($fields);
     }
 
-    protected function checkPermissions(): bool {
-        // Permite el acceso a usuarios autenticados. Puedes ajustarlo según tu política de seguridad.
-        return true;
-    }
+    protected function checkPermissions(): bool { return true; }
 
-    /**
-     * Convierte bytes a un formato legible (KB, MB, GB, etc.)
-     */
     private function formatBytes(float $bytes): string {
         if ($bytes <= 0) return '0 B';
-
         $units = ['B', 'KB', 'MB', 'GB', 'TB'];
         $power = floor(log($bytes, 1024));
         $power = min($power, count($units) - 1);
-
-        $value = $bytes / pow(1024, $power);
-
-        return round($value, 2) . ' ' . $units[$power];
+        return round($bytes / pow(1024, $power), 2) . ' ' . $units[$power];
     }
 
     protected function doAction(): void {
         $hostids = $this->getInput('hostids', []);
-
         if (empty($hostids)) {
             header('Content-Type: application/json');
             echo json_encode(['metrics' => []]);
             exit;
         }
 
-        // Lista de llaves que buscamos (Compatibilidad Linux + Windows)
-        $metric_keys = [
-            'system.cpu.util',                         // CPU Linux / Windows (Agent)
-            'system.cpu.num',                          // Cores Linux / Windows
-            'perf_counter_en["\Processor(_Total)\% Processor Time"]', // CPU Windows Alternativo
-            'vm.memory.utilization',                   // RAM % Linux
-            'vm.memory.size[pavailable]',              // RAM % Disponible (Calcularemos el uso)
-            'vm.memory.size[available]',               // RAM Disponible Bytes
-            'vm.memory.size[total]',                   // RAM Total Bytes
-            'vfs.fs.size[/,pused]',                    // Disco Linux (Raíz)
-            'vfs.fs.size[C:,pused]'                    // Disco Windows (C:)
-        ];
-
         try {
             $items = API::Item()->get([
-                'output' => ['itemid', 'hostid', 'key_', 'lastvalue', 'units'],
+                'output' => ['hostid', 'key_', 'lastvalue'],
                 'hostids' => $hostids,
-                'search' => [
-                    'key_' => $metric_keys
-                ],
+                'search' => ['key_' => ['cpu', 'memory', 'vfs.fs', 'perf_counter']], // Búsqueda amplia incluyendo contadores Windows
                 'searchByAny' => true,
                 'monitored' => true
             ]);
 
             $metrics = [];
             foreach ($items as $item) {
-                $hostid = $item['hostid'];
+                $hid = $item['hostid'];
                 $key = $item['key_'];
                 $val = $item['lastvalue'];
 
-                if (!isset($metrics[$hostid])) {
-                    $metrics[$hostid] = [];
+                if (!isset($metrics[$hid])) $metrics[$hid] = [];
+
+                // CPU UTIL: Linux o Windows (Processor Time)
+                if (strpos($key, 'system.cpu.util') !== false || stripos($key, 'Processor Time') !== false) {
+                    $metrics[$hid]['cpu_util'] = round((float)$val, 2);
+                } 
+                // CORES: system.cpu.num es estándar, pero a veces varía
+                if (strpos($key, 'system.cpu.num') !== false) {
+                    $metrics[$hid]['cpu_cores'] = (int)$val;
                 }
-
-                // --- PROCESAMIENTO DE CPU ---
-                if (strpos($key, 'cpu.util') !== false || strpos($key, 'Processor Time') !== false) {
-                    $metrics[$hostid]['cpu_util'] = round((float)$val, 2);
-                } 
-                elseif (strpos($key, 'cpu.num') !== false) {
-                    $metrics[$hostid]['cpu_cores'] = (int)$val;
-                } 
-
-                // --- PROCESAMIENTO DE MEMORIA RAM ---
-                elseif (strpos($key, 'memory.utilization') !== false) {
-                    $metrics[$hostid]['memory_util'] = round((float)$val, 2);
-                } 
-                elseif (strpos($key, 'pavailable') !== false) {
-                    // Si no existe la llave de "utilización", la calculamos: 100 - disponible
-                    if (!isset($metrics[$hostid]['memory_util'])) {
-                        $metrics[$hostid]['memory_util'] = round(100 - (float)$val, 2);
+                // MEMORIA UTILIZACIÓN
+                if (strpos($key, 'vm.memory.utilization') !== false || strpos($key, 'vm.memory.size[pused]') !== false) {
+                    $metrics[$hid]['memory_util'] = round((float)$val, 2);
+                } elseif (strpos($key, 'vm.memory.size[pavailable]') !== false) {
+                    // Si Windows da 'disponible', calculamos el 'uso'
+                    if (!isset($metrics[$hid]['memory_util'])) {
+                        $metrics[$hid]['memory_util'] = round(100 - (float)$val, 2);
                     }
-                } 
-                elseif (strpos($key, 'size[available]') !== false) {
-                    $metrics[$hostid]['memory_available'] = $this->formatBytes((float)$val);
-                } 
-                elseif (strpos($key, 'size[total]') !== false) {
-                    $metrics[$hostid]['memory_total'] = $this->formatBytes((float)$val);
-                } 
-
-                // --- PROCESAMIENTO DE DISCO (pused detecta tanto / como C:) ---
-                elseif (strpos($key, 'pused') !== false) {
-                    $metrics[$hostid]['disk'] = round((float)$val, 2);
+                }
+                // MEMORIA BYTES
+                if (strpos($key, 'vm.memory.size[available]') !== false || strpos($key, 'vm.memory.size[free]') !== false) {
+                    $metrics[$hid]['memory_available'] = $this->formatBytes((float)$val);
+                }
+                if (strpos($key, 'vm.memory.size[total]') !== false) {
+                    $metrics[$hid]['memory_total'] = $this->formatBytes((float)$val);
+                }
+                // DISCO: Captura '/' para Linux y 'C:' para Windows
+                if (strpos($key, 'vfs.fs.size') !== false && strpos($key, 'pused') !== false && 
+                   (strpos($key, '[/,') !== false || stripos($key, '[C:,') !== false)) {
+                    $metrics[$hid]['disk'] = round((float)$val, 2);
                 }
             }
 
             header('Content-Type: application/json');
             echo json_encode(['metrics' => $metrics]);
             exit;
-
         } catch (\Exception $e) {
             header('Content-Type: application/json');
             echo json_encode(['error' => $e->getMessage()]);
