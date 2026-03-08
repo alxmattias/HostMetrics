@@ -4,7 +4,7 @@
     "name": "Host Metrics Enhancer",
     "version": "1.0.0",
     "namespace": "HostMetrics",
-    "author": "Monzphere",
+    "author": "Amatias",
     "description": "Adds CPU, Memory, and Disk metrics to the native host views",
     "actions": {
         "hostmetrics.data": {
